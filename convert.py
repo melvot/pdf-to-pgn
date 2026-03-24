@@ -17,6 +17,16 @@ import pymupdf4llm
 MODEL = "claude-sonnet-4-6"
 
 
+def strip_code_fences(text):
+    """Remove markdown code fences from LLM output."""
+    lines = text.strip().splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
 def pdf_pages_to_images(pdf_path, pages):
     """Convert PDF pages to base64-encoded PNG images."""
     doc = pymupdf.open(pdf_path)
@@ -60,7 +70,7 @@ def pass1_extract_moves(client, images_b64):
         temperature=0,
         messages=[{"role": "user", "content": content}],
     )
-    return response.content[0].text
+    return strip_code_fences(response.content[0].text)
 
 
 def validate_pgn(pgn_text):
@@ -108,7 +118,7 @@ CRITICAL:
         temperature=0,
         messages=[{"role": "user", "content": content}],
     )
-    return response.content[0].text
+    return strip_code_fences(response.content[0].text)
 
 
 def parse_page_range(page_str):
