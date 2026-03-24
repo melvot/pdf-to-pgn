@@ -131,6 +131,11 @@ def strip_result(pgn_text):
     pgn_text = re.sub(r'^\[Result "[^"]*"\]\n', '', pgn_text, flags=re.MULTILINE)
     # Collapse newlines inside comments (Lichess doesn't support multi-line comments)
     pgn_text = re.sub(r'\{[^}]*\}', lambda m: m.group().replace('\n', ' '), pgn_text, flags=re.DOTALL)
+    # Collapse blank lines in movetext (they act as game separators in PGN)
+    header, sep, movetext = pgn_text.partition('\n\n')
+    if sep:
+        movetext = re.sub(r'\n\n+', ' ', movetext)
+        pgn_text = header + sep + movetext
     parts = re.split(r'(\{[^}]*\})', pgn_text)
     parts = [
         re.sub(r'\s*(1-0|0-1|1/2-1/2|\*)\s*', ' ', p) if not p.startswith('{') else p
@@ -161,7 +166,8 @@ def detect_games(pdf_path):
     games = []
     for i, (num, start) in enumerate(sorted_games):
         if i + 1 < len(sorted_games):
-            end = sorted_games[i + 1][1] - 1
+            # Include next game's first page as overlap (game endings often spill over)
+            end = sorted_games[i + 1][1]
         else:
             end = total_pages - 1
         games.append((num, start, end))
