@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import json
 import os
 import re
 import sys
@@ -13,6 +14,8 @@ import chess.pgn
 import io
 import pymupdf
 import pymupdf4llm
+
+CACHE_FILE = ".cache.json"
 
 
 MODEL = "claude-sonnet-4-6"
@@ -130,10 +133,30 @@ def parse_page_range(page_str):
     return [int(page_str) - 1]
 
 
+def load_cache():
+    """Load cache from disk."""
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_cache(cache):
+    """Save cache to disk."""
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def cache_key(pdf_path, pages_str):
+    """Generate a cache key from PDF name and page range."""
+    return f"{Path(pdf_path).stem}_p{pages_str}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert chess book PDF to PGN")
     parser.add_argument("pdf", help="Path to PDF file")
     parser.add_argument("--pages", required=True, help="Page range, e.g. '1-5' or '3'")
+    parser.add_argument("--cached", action="store_true", help="Use cached API responses")
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -144,33 +167,46 @@ def main():
     pages = parse_page_range(args.pages)
     print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
 
-    # Load API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
-        sys.exit(1)
+    cache = load_cache()
+    key = cache_key(args.pdf, args.pages)
 
-    client = anthropic.Anthropic(api_key=api_key)
-
-    # Convert pages to images
-    images_b64 = pdf_pages_to_images(args.pdf, pages)
-
-    # Pass 1: Extract moves
-    print("Pass 1: Extracting moves...", file=sys.stderr)
-    pgn_moves = pass1_extract_moves(client, images_b64)
-    print(f"Moves:\n{pgn_moves}\n", file=sys.stderr)
-
-    # Validate
-    game, errors = validate_pgn(pgn_moves)
-    if errors:
-        print(f"Warning: PGN validation issues: {errors}", file=sys.stderr)
+    if args.cached and key in cache:
+        print("Using cached API responses", file=sys.stderr)
+        pgn_moves = cache[key]["pass1"]
+        full_pgn = cache[key]["pass2"]
     else:
-        print("Pass 1 PGN validated OK", file=sys.stderr)
+        # Load API key
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
+            sys.exit(1)
 
-    # Pass 2: Attach commentary
-    print("Pass 2: Attaching commentary...", file=sys.stderr)
-    ocr_text = pymupdf4llm.to_markdown(args.pdf, pages=pages)
-    full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+        client = anthropic.Anthropic(api_key=api_key)
+
+        # Convert pages to images
+        images_b64 = pdf_pages_to_images(args.pdf, pages)
+
+        # Pass 1: Extract moves
+        print("Pass 1: Extracting moves...", file=sys.stderr)
+        pgn_moves = pass1_extract_moves(client, images_b64)
+        print(f"Moves:\n{pgn_moves}\n", file=sys.stderr)
+
+        # Validate
+        game, errors = validate_pgn(pgn_moves)
+        if errors:
+            print(f"Warning: PGN validation issues: {errors}", file=sys.stderr)
+        else:
+            print("Pass 1 PGN validated OK", file=sys.stderr)
+
+        # Pass 2: Attach commentary
+        print("Pass 2: Attaching commentary...", file=sys.stderr)
+        ocr_text = pymupdf4llm.to_markdown(args.pdf, pages=pages)
+        full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+
+        # Save to cache
+        cache[key] = {"pass1": pgn_moves, "pass2": full_pgn}
+        save_cache(cache)
+        print("Cached API responses", file=sys.stderr)
 
     # Strip result so Lichess doesn't spoil the ending
     full_pgn = re.sub(r'^\[Result "[^"]*"\]\n', '', full_pgn, flags=re.MULTILINE)
