@@ -4,6 +4,7 @@
 import argparse
 import base64
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -170,6 +171,16 @@ def main():
     print("Pass 2: Attaching commentary...", file=sys.stderr)
     ocr_text = pymupdf4llm.to_markdown(args.pdf, pages=pages)
     full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+
+    # Strip result so Lichess doesn't spoil the ending
+    full_pgn = re.sub(r'^\[Result "[^"]*"\]\n', '', full_pgn, flags=re.MULTILINE)
+    # Remove result marker outside of comments: split on {}, only strip from non-comment parts
+    parts = re.split(r'(\{[^}]*\})', full_pgn)
+    parts = [
+        re.sub(r'\s*(1-0|0-1|1/2-1/2)\s*', ' ', p) if not p.startswith('{') else p
+        for p in parts
+    ]
+    full_pgn = ''.join(parts).rstrip()
 
     # Save output
     output_dir = Path("output")
