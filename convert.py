@@ -131,7 +131,7 @@ def strip_result(pgn_text):
     pgn_text = re.sub(r'^\[Result "[^"]*"\]\n', '', pgn_text, flags=re.MULTILINE)
     parts = re.split(r'(\{[^}]*\})', pgn_text)
     parts = [
-        re.sub(r'\s*(1-0|0-1|1/2-1/2)\s*', ' ', p) if not p.startswith('{') else p
+        re.sub(r'\s*(1-0|0-1|1/2-1/2|\*)\s*', ' ', p) if not p.startswith('{') else p
         for p in parts
     ]
     return ''.join(parts).rstrip()
@@ -235,12 +235,136 @@ def cache_key(pdf_path, pages_str):
     return f"{Path(pdf_path).stem}_p{pages_str}"
 
 
+def cmd_detect(args, output_dir):
+    """Detect game boundaries and write manifest."""
+    print("Detecting game boundaries...", file=sys.stderr)
+    games = detect_games(args.pdf)
+    print(f"Found {len(games)} games", file=sys.stderr)
+
+    manifest = {
+        "pdf": args.pdf,
+        "games": [
+            {
+                "game_num": num,
+                "start_page": start,
+                "end_page": end,
+                "pages_human": f"{start+1}-{end+1}",
+            }
+            for num, start, end in games
+        ],
+    }
+
+    manifest_path = output_dir / f"{Path(args.pdf).stem}_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Manifest written to {manifest_path}", file=sys.stderr)
+
+    for g in manifest["games"]:
+        print(f"  Game {g['game_num']}: pages {g['pages_human']}", file=sys.stderr)
+
+    return manifest_path
+
+
+def load_manifest(args, output_dir):
+    """Load manifest from --manifest flag or default path."""
+    if args.manifest:
+        path = Path(args.manifest)
+    else:
+        path = output_dir / f"{Path(args.pdf).stem}_manifest.json"
+    if not path.exists():
+        print(f"Error: manifest not found at {path}. Run --detect first.", file=sys.stderr)
+        sys.exit(1)
+    with open(path) as f:
+        return json.load(f)
+
+
+def cmd_generate(args, output_dir):
+    """Process games from manifest into individual PGN files."""
+    manifest = load_manifest(args, output_dir)
+    games = manifest["games"]
+
+    # Filter by --games if specified
+    if args.games:
+        selected = set(int(n) for n in args.games.split(","))
+        games = [g for g in games if g["game_num"] in selected]
+        print(f"Processing {len(games)} selected game(s)", file=sys.stderr)
+
+    games_dir = output_dir / "games"
+    games_dir.mkdir(exist_ok=True)
+
+    cache = load_cache()
+    stem = Path(args.pdf).stem
+
+    client = None
+    if not args.cached:
+        client = get_client()
+
+    for g in games:
+        game_num = g["game_num"]
+        pages = list(range(g["start_page"], g["end_page"] + 1))
+        print(f"\nGame {game_num} (pages {g['pages_human']})...", file=sys.stderr)
+
+        cache_k = f"{stem}_game{game_num}"
+        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+        full_pgn = strip_result(full_pgn)
+
+        pgn_path = games_dir / f"game_{game_num:02d}.pgn"
+        pgn_path.write_text(full_pgn)
+
+        errors_path = games_dir / f"game_{game_num:02d}.errors.txt"
+        if errors:
+            errors_path.write_text("\n".join(errors) + "\n")
+            print(f"  Errors: {errors_path}", file=sys.stderr)
+        elif errors_path.exists():
+            errors_path.unlink()
+
+    print(f"\nGenerated PGNs in {games_dir}", file=sys.stderr)
+
+
+def cmd_combine(args, output_dir):
+    """Combine individual game PGNs into a single file."""
+    manifest = load_manifest(args, output_dir)
+    games_dir = output_dir / "games"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = Path(args.pdf).stem
+
+    all_pgns = []
+    all_errors = []
+    for g in manifest["games"]:
+        game_num = g["game_num"]
+        pgn_path = games_dir / f"game_{game_num:02d}.pgn"
+        if not pgn_path.exists():
+            print(f"  Warning: {pgn_path} not found, skipping", file=sys.stderr)
+            continue
+        all_pgns.append(pgn_path.read_text().rstrip())
+
+        errors_path = games_dir / f"game_{game_num:02d}.errors.txt"
+        if errors_path.exists():
+            for line in errors_path.read_text().strip().splitlines():
+                all_errors.append(f"Game {game_num} (pages {g['pages_human']}): {line}")
+
+    combined = "\n\n".join(all_pgns)
+    out_path = output_dir / f"{stem}_combined_{timestamp}.pgn"
+    out_path.write_text(combined)
+    print(f"Combined {len(all_pgns)} games into {out_path}", file=sys.stderr)
+
+    if all_errors:
+        errors_path = out_path.with_suffix(".errors.txt")
+        errors_path.write_text("\n".join(all_errors) + "\n")
+        print(f"Errors: {errors_path}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert chess book PDF to PGN")
     parser.add_argument("pdf", help="Path to PDF file")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--pages", help="Page range, e.g. '1-5' or '3'")
-    group.add_argument("--book", action="store_true", help="Process entire book")
+    group.add_argument("--detect", action="store_true", help="Detect games, write manifest")
+    group.add_argument("--generate", action="store_true", help="Process games from manifest")
+    group.add_argument("--combine", action="store_true", help="Combine game PGNs into one file")
+    group.add_argument("--book", action="store_true", help="Full pipeline (detect+generate+combine)")
+    parser.add_argument("--games", help="Comma-separated game numbers (with --generate)")
+    parser.add_argument("--manifest", help="Path to manifest file")
     parser.add_argument("--cached", action="store_true", help="Use cached API responses")
     args = parser.parse_args()
 
@@ -249,55 +373,26 @@ def main():
         print(f"Error: {pdf_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    cache = load_cache()
-    stem = pdf_path.stem
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 
-    # Set up API client (not needed if fully cached)
-    client = None
-    if not args.cached:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
-            sys.exit(1)
-        client = anthropic.Anthropic(api_key=api_key)
-
-    if args.book:
-        print("Detecting game boundaries...", file=sys.stderr)
-        games = detect_games(args.pdf)
-        print(f"Found {len(games)} games", file=sys.stderr)
-
-        all_pgns = []
-        all_errors = []
-        for game_num, start, end in games:
-            pages = list(range(start, end + 1))
-            print(f"\nGame {game_num}/{games[-1][0]} (pages {start+1}-{end+1})...", file=sys.stderr)
-            cache_k = f"{stem}_game{game_num}"
-            full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
-            full_pgn = strip_result(full_pgn)
-            all_pgns.append(full_pgn)
-            if errors:
-                all_errors.append((game_num, start + 1, end + 1, errors))
-
-        combined = "\n\n".join(all_pgns)
-        out_path = output_dir / f"{stem}_full_{timestamp}.pgn"
-        out_path.write_text(combined)
-        print(f"\nSaved {len(games)} games to {out_path}", file=sys.stderr)
-
-        # Write errors file
-        if all_errors:
-            errors_path = out_path.with_suffix(".errors.txt")
-            with open(errors_path, "w") as f:
-                for game_num, start, end, errors in all_errors:
-                    for err in errors:
-                        f.write(f"Game {game_num} (pages {start}-{end}): {err}\n")
-            print(f"{len(all_errors)} games with validation errors: {errors_path}", file=sys.stderr)
-        else:
-            print("All games validated OK", file=sys.stderr)
-
+    if args.detect:
+        cmd_detect(args, output_dir)
+    elif args.generate:
+        cmd_generate(args, output_dir)
+    elif args.combine:
+        cmd_combine(args, output_dir)
+    elif args.book:
+        cmd_detect(args, output_dir)
+        cmd_generate(args, output_dir)
+        cmd_combine(args, output_dir)
     else:
+        # --pages mode
+        cache = load_cache()
+        client = None
+        if not args.cached:
+            client = get_client()
+
         pages = parse_page_range(args.pages)
         print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
         cache_k = cache_key(args.pdf, args.pages)
@@ -306,8 +401,9 @@ def main():
         if errors:
             print(f"Validation errors: {errors}", file=sys.stderr)
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         page_label = args.pages.replace("-", "_")
-        out_path = output_dir / f"{stem}_p{page_label}_{timestamp}.pgn"
+        out_path = output_dir / f"{pdf_path.stem}_p{page_label}_{timestamp}.pgn"
         out_path.write_text(full_pgn)
         print(f"\nSaved to {out_path}", file=sys.stderr)
         print(full_pgn)

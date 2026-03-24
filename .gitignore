@@ -3,3 +3,4 @@
 *.pdf
 output/
 .cache.json
+roadmap.md
