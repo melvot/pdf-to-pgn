@@ -177,10 +177,10 @@ def get_client():
 
 
 def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
-    """Process a single game through pass 1 and pass 2. Returns full PGN text."""
+    """Process a single game through pass 1 and pass 2. Returns (full_pgn, errors)."""
     if use_cache and cache_k in cache:
         print(f"  Using cached responses", file=sys.stderr)
-        return cache[cache_k]["pass2"]
+        return cache[cache_k]["pass2"], cache[cache_k].get("errors", [])
 
     if client is None:
         client = get_client()
@@ -202,10 +202,10 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
     ocr_text = pymupdf4llm.to_markdown(pdf_path, pages=pages)
     full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
 
-    cache[cache_k] = {"pass1": pgn_moves, "pass2": full_pgn}
+    cache[cache_k] = {"pass1": pgn_moves, "pass2": full_pgn, "errors": errors}
     save_cache(cache)
 
-    return full_pgn
+    return full_pgn, errors
 
 
 def parse_page_range(page_str):
@@ -270,25 +270,41 @@ def main():
         print(f"Found {len(games)} games", file=sys.stderr)
 
         all_pgns = []
+        all_errors = []
         for game_num, start, end in games:
             pages = list(range(start, end + 1))
             print(f"\nGame {game_num}/{games[-1][0]} (pages {start+1}-{end+1})...", file=sys.stderr)
             cache_k = f"{stem}_game{game_num}"
-            full_pgn = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+            full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
             full_pgn = strip_result(full_pgn)
             all_pgns.append(full_pgn)
+            if errors:
+                all_errors.append((game_num, start + 1, end + 1, errors))
 
         combined = "\n\n".join(all_pgns)
         out_path = output_dir / f"{stem}_full_{timestamp}.pgn"
         out_path.write_text(combined)
         print(f"\nSaved {len(games)} games to {out_path}", file=sys.stderr)
 
+        # Write errors file
+        if all_errors:
+            errors_path = out_path.with_suffix(".errors.txt")
+            with open(errors_path, "w") as f:
+                for game_num, start, end, errors in all_errors:
+                    for err in errors:
+                        f.write(f"Game {game_num} (pages {start}-{end}): {err}\n")
+            print(f"{len(all_errors)} games with validation errors: {errors_path}", file=sys.stderr)
+        else:
+            print("All games validated OK", file=sys.stderr)
+
     else:
         pages = parse_page_range(args.pages)
         print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
         cache_k = cache_key(args.pdf, args.pages)
-        full_pgn = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
         full_pgn = strip_result(full_pgn)
+        if errors:
+            print(f"Validation errors: {errors}", file=sys.stderr)
 
         page_label = args.pages.replace("-", "_")
         out_path = output_dir / f"{stem}_p{page_label}_{timestamp}.pgn"
