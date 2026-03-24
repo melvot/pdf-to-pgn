@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+from datetime import datetime
 import json
 import os
 import re
@@ -61,8 +62,8 @@ def pass1_extract_moves(client, images_b64):
             "text": (
                 "These are pages from a chess book. Extract ONLY the chess moves "
                 "as PGN. Use standard algebraic notation (K, Q, R, B, N for pieces). "
-                "Do NOT include commentary or annotations. Include variations in "
-                "parentheses. Include game headers [Event], [White], [Black], "
+                "Do NOT include commentary, annotations, or variations. Just the "
+                "main line moves. Include game headers [Event], [White], [Black], "
                 "[Result], [Opening] if visible. Output only valid PGN, nothing else."
             ),
         }
@@ -110,7 +111,7 @@ Using the page images for visual reference and layout ordering, and the OCR text
 CRITICAL:
 - Include EVERY paragraph of the author's explanations, attached to the move it follows.
 - This is an instructional book — the prose commentary IS the content. Do not skip any of it.
-- Include chess variations in parentheses ().
+- Do NOT include PGN variations in parentheses. Keep all analysis lines as text within the commentary.
 - Preserve the author's exact wording from the OCR text (fixing only garbled piece symbols).
 - Output only valid PGN, nothing else.""",
         },
@@ -223,7 +224,8 @@ def main():
     output_dir.mkdir(exist_ok=True)
     stem = pdf_path.stem
     page_label = args.pages.replace("-", "_")
-    out_path = output_dir / f"{stem}_p{page_label}.pgn"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = output_dir / f"{stem}_p{page_label}_{timestamp}.pgn"
     out_path.write_text(full_pgn)
 
     print(f"\nSaved to {out_path}", file=sys.stderr)
