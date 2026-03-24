@@ -126,6 +126,88 @@ CRITICAL:
     return strip_code_fences(response.content[0].text)
 
 
+def strip_result(pgn_text):
+    """Remove result header and marker so Lichess doesn't spoil the ending."""
+    pgn_text = re.sub(r'^\[Result "[^"]*"\]\n', '', pgn_text, flags=re.MULTILINE)
+    parts = re.split(r'(\{[^}]*\})', pgn_text)
+    parts = [
+        re.sub(r'\s*(1-0|0-1|1/2-1/2)\s*', ' ', p) if not p.startswith('{') else p
+        for p in parts
+    ]
+    return ''.join(parts).rstrip()
+
+
+def detect_games(pdf_path):
+    """Detect game boundaries in a chess book PDF.
+    Returns list of (game_number, start_page, end_page) tuples (0-indexed pages)."""
+    doc = pymupdf.open(pdf_path)
+    total_pages = len(doc)
+
+    game_starts = {}  # game_number -> first page (0-indexed)
+
+    for page_num in range(total_pages):
+        text = pymupdf4llm.to_markdown(pdf_path, pages=[page_num])
+        # Match "Game N" anywhere on a line, handling OCR spaces in numbers
+        matches = re.findall(r'Game\s+(\d[\d ]*)', text)
+        for m in matches:
+            num = int(m.replace(' ', ''))
+            if num not in game_starts:
+                game_starts[num] = page_num
+
+    # Sort by game number and build ranges
+    sorted_games = sorted(game_starts.items())
+    games = []
+    for i, (num, start) in enumerate(sorted_games):
+        if i + 1 < len(sorted_games):
+            end = sorted_games[i + 1][1] - 1
+        else:
+            end = total_pages - 1
+        games.append((num, start, end))
+
+    return games
+
+
+def get_client():
+    """Create and return an Anthropic client."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
+    """Process a single game through pass 1 and pass 2. Returns full PGN text."""
+    if use_cache and cache_k in cache:
+        print(f"  Using cached responses", file=sys.stderr)
+        return cache[cache_k]["pass2"]
+
+    if client is None:
+        client = get_client()
+
+    images_b64 = pdf_pages_to_images(pdf_path, pages)
+
+    # Pass 1
+    print(f"  Pass 1: Extracting moves...", file=sys.stderr)
+    pgn_moves = pass1_extract_moves(client, images_b64)
+
+    game, errors = validate_pgn(pgn_moves)
+    if errors:
+        print(f"  Warning: PGN validation issues: {errors}", file=sys.stderr)
+    else:
+        print(f"  Pass 1 validated OK", file=sys.stderr)
+
+    # Pass 2
+    print(f"  Pass 2: Attaching commentary...", file=sys.stderr)
+    ocr_text = pymupdf4llm.to_markdown(pdf_path, pages=pages)
+    full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+
+    cache[cache_k] = {"pass1": pgn_moves, "pass2": full_pgn}
+    save_cache(cache)
+
+    return full_pgn
+
+
 def parse_page_range(page_str):
     """Parse page range string like '1-5' into list of 0-indexed page numbers."""
     if "-" in page_str:
@@ -156,7 +238,9 @@ def cache_key(pdf_path, pages_str):
 def main():
     parser = argparse.ArgumentParser(description="Convert chess book PDF to PGN")
     parser.add_argument("pdf", help="Path to PDF file")
-    parser.add_argument("--pages", required=True, help="Page range, e.g. '1-5' or '3'")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--pages", help="Page range, e.g. '1-5' or '3'")
+    group.add_argument("--book", action="store_true", help="Process entire book")
     parser.add_argument("--cached", action="store_true", help="Use cached API responses")
     args = parser.parse_args()
 
@@ -165,71 +249,52 @@ def main():
         print(f"Error: {pdf_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    pages = parse_page_range(args.pages)
-    print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
-
     cache = load_cache()
-    key = cache_key(args.pdf, args.pages)
+    stem = pdf_path.stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
 
-    if args.cached and key in cache:
-        print("Using cached API responses", file=sys.stderr)
-        pgn_moves = cache[key]["pass1"]
-        full_pgn = cache[key]["pass2"]
-    else:
-        # Load API key
+    # Set up API client (not needed if fully cached)
+    client = None
+    if not args.cached:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
             sys.exit(1)
-
         client = anthropic.Anthropic(api_key=api_key)
 
-        # Convert pages to images
-        images_b64 = pdf_pages_to_images(args.pdf, pages)
+    if args.book:
+        print("Detecting game boundaries...", file=sys.stderr)
+        games = detect_games(args.pdf)
+        print(f"Found {len(games)} games", file=sys.stderr)
 
-        # Pass 1: Extract moves
-        print("Pass 1: Extracting moves...", file=sys.stderr)
-        pgn_moves = pass1_extract_moves(client, images_b64)
-        print(f"Moves:\n{pgn_moves}\n", file=sys.stderr)
+        all_pgns = []
+        for game_num, start, end in games:
+            pages = list(range(start, end + 1))
+            print(f"\nGame {game_num}/{games[-1][0]} (pages {start+1}-{end+1})...", file=sys.stderr)
+            cache_k = f"{stem}_game{game_num}"
+            full_pgn = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+            full_pgn = strip_result(full_pgn)
+            all_pgns.append(full_pgn)
 
-        # Validate
-        game, errors = validate_pgn(pgn_moves)
-        if errors:
-            print(f"Warning: PGN validation issues: {errors}", file=sys.stderr)
-        else:
-            print("Pass 1 PGN validated OK", file=sys.stderr)
+        combined = "\n\n".join(all_pgns)
+        out_path = output_dir / f"{stem}_full_{timestamp}.pgn"
+        out_path.write_text(combined)
+        print(f"\nSaved {len(games)} games to {out_path}", file=sys.stderr)
 
-        # Pass 2: Attach commentary
-        print("Pass 2: Attaching commentary...", file=sys.stderr)
-        ocr_text = pymupdf4llm.to_markdown(args.pdf, pages=pages)
-        full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+    else:
+        pages = parse_page_range(args.pages)
+        print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
+        cache_k = cache_key(args.pdf, args.pages)
+        full_pgn = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+        full_pgn = strip_result(full_pgn)
 
-        # Save to cache
-        cache[key] = {"pass1": pgn_moves, "pass2": full_pgn}
-        save_cache(cache)
-        print("Cached API responses", file=sys.stderr)
-
-    # Strip result so Lichess doesn't spoil the ending
-    full_pgn = re.sub(r'^\[Result "[^"]*"\]\n', '', full_pgn, flags=re.MULTILINE)
-    # Remove result marker outside of comments: split on {}, only strip from non-comment parts
-    parts = re.split(r'(\{[^}]*\})', full_pgn)
-    parts = [
-        re.sub(r'\s*(1-0|0-1|1/2-1/2)\s*', ' ', p) if not p.startswith('{') else p
-        for p in parts
-    ]
-    full_pgn = ''.join(parts).rstrip()
-
-    # Save output
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
-    stem = pdf_path.stem
-    page_label = args.pages.replace("-", "_")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = output_dir / f"{stem}_p{page_label}_{timestamp}.pgn"
-    out_path.write_text(full_pgn)
-
-    print(f"\nSaved to {out_path}", file=sys.stderr)
-    print(full_pgn)
+        page_label = args.pages.replace("-", "_")
+        out_path = output_dir / f"{stem}_p{page_label}_{timestamp}.pgn"
+        out_path.write_text(full_pgn)
+        print(f"\nSaved to {out_path}", file=sys.stderr)
+        print(full_pgn)
 
 
 if __name__ == "__main__":
