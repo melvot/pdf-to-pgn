@@ -1,4 +1,4 @@
-# chessbooks
+# pdf-to-pgn
 
 Convert chess book PDFs to annotated PGN using Claude Vision.
 
