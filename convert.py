@@ -23,13 +23,13 @@ MODEL = "claude-sonnet-4-6"
 
 
 def strip_code_fences(text):
-    """Remove markdown code fences from LLM output."""
-    lines = text.strip().splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines)
+    """Remove markdown code fences from LLM output.
+    Handles preamble text before the first code block."""
+    # If there's a code fence anywhere, extract just its contents
+    match = re.search(r'```[^\n]*\n(.*?)```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
 
 def pdf_pages_to_images(pdf_path, pages):
@@ -54,17 +54,19 @@ def build_image_content(images_b64):
     ]
 
 
-def pass1_extract_moves(client, images_b64):
+def pass1_extract_moves(client, images_b64, game_hint=None):
     """Pass 1: Extract clean PGN moves from page images (no commentary)."""
+    target = f" for {game_hint}" if game_hint else ""
+    ignore = " Ignore any other games on these pages." if game_hint else ""
     content = build_image_content(images_b64) + [
         {
             "type": "text",
             "text": (
-                "These are pages from a chess book. Extract ONLY the chess moves "
+                f"These are pages from a chess book. Extract ONLY the chess moves{target} "
                 "as PGN. Use standard algebraic notation (K, Q, R, B, N for pieces). "
                 "Do NOT include commentary, annotations, or variations. Just the "
                 "main line moves. Include game headers [Event], [White], [Black], "
-                "[Result], [Opening] if visible. Output only valid PGN, nothing else."
+                f"[Result], [Opening] if visible.{ignore} Output only valid PGN, nothing else."
             ),
         }
     ]
@@ -93,12 +95,13 @@ def validate_pgn(pgn_text):
     return game, errors
 
 
-def pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves):
+def pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves, game_hint=None):
     """Pass 2: Attach full book commentary to the PGN moves."""
+    target = f" for {game_hint}" if game_hint else ""
     content = build_image_content(images_b64) + [
         {
             "type": "text",
-            "text": f"""Here are the clean PGN moves extracted from these chess book pages:
+            "text": f"""Here are the clean PGN moves{target} extracted from these chess book pages:
 
 {pgn_moves}
 
@@ -198,8 +201,8 @@ def detect_games(pdf_path):
 
     for page_num in range(total_pages):
         text = doc[page_num].get_text()
-        # Match "Game N" anywhere on a line, handling OCR spaces in numbers
-        matches = re.findall(r'Game\s+(\d[\d ]*)', text)
+        # Match "Game N" only at the start of a line (real headings, not prose references)
+        matches = re.findall(r'(?m)^Game\s+(\d[\d ]*)\s*$', text)
         for m in matches:
             num = int(m.replace(' ', ''))
             if num not in game_starts:
@@ -225,7 +228,7 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
-def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
+def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=None):
     """Process a single game through pass 1 and pass 2. Returns (full_pgn, errors)."""
     if use_cache and cache_k in cache:
         print(f"  Using cached responses", file=sys.stderr)
@@ -238,7 +241,7 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
 
     # Pass 1
     print(f"  Pass 1: Extracting moves...", file=sys.stderr)
-    pgn_moves = pass1_extract_moves(client, images_b64)
+    pgn_moves = pass1_extract_moves(client, images_b64, game_hint)
 
     game, errors = validate_pgn(pgn_moves)
     if errors:
@@ -249,7 +252,7 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
     # Pass 2
     print(f"  Pass 2: Attaching commentary...", file=sys.stderr)
     ocr_text = pymupdf4llm.to_markdown(pdf_path, pages=pages)
-    full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
+    full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves, game_hint)
 
     _, pass2_errors = validate_pgn(full_pgn)
     if pass2_errors:
@@ -375,7 +378,8 @@ def cmd_generate(args, run_dir):
         print(f"\nGame {game_num} (pages {g['pages_human']})...", file=sys.stderr)
 
         cache_k = f"{stem}_game{game_num}"
-        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
+        game_hint = f"Game {game_num}"
+        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached, game_hint)
         full_pgn = strip_result(full_pgn)
 
         pgn_path = games_dir / f"game_{game_num:02d}.pgn"
