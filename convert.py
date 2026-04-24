@@ -388,6 +388,11 @@ def main():
     parser.add_argument("--cached", action="store_true", help="Use cached API responses")
     args = parser.parse_args()
 
+    needs_api = (args.pages or args.generate or args.book) and not args.cached
+    if needs_api and not os.environ.get("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():
         print(f"Error: {pdf_path} not found", file=sys.stderr)
