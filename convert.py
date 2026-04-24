@@ -238,12 +238,31 @@ def save_cache(cache):
         json.dump(cache, f, indent=2)
 
 
+def make_run_dir(stem):
+    """Create a new timestamped run directory."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("output") / f"{stem}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def find_run_dir(args, stem):
+    """Find the run directory from --manifest flag or latest run."""
+    if args.manifest:
+        return Path(args.manifest).parent
+    candidates = sorted(Path("output").glob(f"{stem}_*/"), reverse=True)
+    if not candidates:
+        print(f"Error: no run found for '{stem}'. Run --detect first.", file=sys.stderr)
+        sys.exit(1)
+    return candidates[0]
+
+
 def cache_key(pdf_path, pages_str):
     """Generate a cache key from PDF name and page range."""
     return f"{Path(pdf_path).stem}_p{pages_str}"
 
 
-def cmd_detect(args, output_dir):
+def cmd_detect(args, run_dir):
     """Detect game boundaries and write manifest."""
     print("Detecting game boundaries...", file=sys.stderr)
     games = detect_games(args.pdf)
@@ -262,7 +281,7 @@ def cmd_detect(args, output_dir):
         ],
     }
 
-    manifest_path = output_dir / f"{Path(args.pdf).stem}_manifest.json"
+    manifest_path = run_dir / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
     print(f"Manifest written to {manifest_path}", file=sys.stderr)
@@ -270,15 +289,10 @@ def cmd_detect(args, output_dir):
     for g in manifest["games"]:
         print(f"  Game {g['game_num']}: pages {g['pages_human']}", file=sys.stderr)
 
-    return manifest_path
 
-
-def load_manifest(args, output_dir):
-    """Load manifest from --manifest flag or default path."""
-    if args.manifest:
-        path = Path(args.manifest)
-    else:
-        path = output_dir / f"{Path(args.pdf).stem}_manifest.json"
+def load_manifest(run_dir):
+    """Load manifest from run directory."""
+    path = run_dir / "manifest.json"
     if not path.exists():
         print(f"Error: manifest not found at {path}. Run --detect first.", file=sys.stderr)
         sys.exit(1)
@@ -286,9 +300,9 @@ def load_manifest(args, output_dir):
         return json.load(f)
 
 
-def cmd_generate(args, output_dir):
+def cmd_generate(args, run_dir):
     """Process games from manifest into individual PGN files."""
-    manifest = load_manifest(args, output_dir)
+    manifest = load_manifest(run_dir)
     games = manifest["games"]
 
     # Filter by --games if specified
@@ -297,7 +311,7 @@ def cmd_generate(args, output_dir):
         games = [g for g in games if g["game_num"] in selected]
         print(f"Processing {len(games)} selected game(s)", file=sys.stderr)
 
-    games_dir = output_dir / "games"
+    games_dir = run_dir / "games"
     games_dir.mkdir(exist_ok=True)
 
     cache = load_cache()
@@ -329,12 +343,10 @@ def cmd_generate(args, output_dir):
     print(f"\nGenerated PGNs in {games_dir}", file=sys.stderr)
 
 
-def cmd_combine(args, output_dir):
+def cmd_combine(args, run_dir):
     """Combine individual game PGNs into a single file."""
-    manifest = load_manifest(args, output_dir)
-    games_dir = output_dir / "games"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = Path(args.pdf).stem
+    manifest = load_manifest(run_dir)
+    games_dir = run_dir / "games"
 
     all_pgns = []
     all_errors = []
@@ -352,12 +364,12 @@ def cmd_combine(args, output_dir):
                 all_errors.append(f"Game {game_num} (pages {g['pages_human']}): {line}")
 
     combined = "\n\n".join(all_pgns)
-    out_path = output_dir / f"{stem}_combined_{timestamp}.pgn"
+    out_path = run_dir / "combined.pgn"
     out_path.write_text(combined)
     print(f"Combined {len(all_pgns)} games into {out_path}", file=sys.stderr)
 
     if all_errors:
-        errors_path = out_path.with_suffix(".errors.txt")
+        errors_path = run_dir / "combined.errors.txt"
         errors_path.write_text("\n".join(all_errors) + "\n")
         print(f"Errors: {errors_path}", file=sys.stderr)
 
@@ -381,19 +393,23 @@ def main():
         print(f"Error: {pdf_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    stem = pdf_path.stem
+
+    if args.detect or args.book or args.pages:
+        run_dir = make_run_dir(stem)
+    else:
+        run_dir = find_run_dir(args, stem)
 
     if args.detect:
-        cmd_detect(args, output_dir)
+        cmd_detect(args, run_dir)
     elif args.generate:
-        cmd_generate(args, output_dir)
+        cmd_generate(args, run_dir)
     elif args.combine:
-        cmd_combine(args, output_dir)
+        cmd_combine(args, run_dir)
     elif args.book:
-        cmd_detect(args, output_dir)
-        cmd_generate(args, output_dir)
-        cmd_combine(args, output_dir)
+        cmd_detect(args, run_dir)
+        cmd_generate(args, run_dir)
+        cmd_combine(args, run_dir)
     else:
         # --pages mode
         cache = load_cache()
@@ -409,9 +425,8 @@ def main():
         if errors:
             print(f"Validation errors: {errors}", file=sys.stderr)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         page_label = args.pages.replace("-", "_")
-        out_path = output_dir / f"{pdf_path.stem}_p{page_label}_{timestamp}.pgn"
+        out_path = run_dir / f"p{page_label}.pgn"
         out_path.write_text(full_pgn)
         print(f"\nSaved to {out_path}", file=sys.stderr)
         print(full_pgn)
