@@ -1,6 +1,6 @@
 # pdf-to-pgn
 
-Convert chess book PDFs to annotated PGN using Claude Vision.
+Chess books contain thousands of annotated games locked in PDF format. This tool extracts them into PGN so you can analyze them with an engine on Lichess or any chess software.
 
 ## How it works
 
