@@ -109,6 +109,7 @@ And here is the OCR-extracted text from the same pages (chess piece symbols may 
 Using the page images for visual reference and layout ordering, and the OCR text for exact commentary wording, produce a complete PGN with ALL of the author's commentary embedded as PGN comments in curly braces {{}}.
 
 CRITICAL:
+- Annotate ONLY the game provided above. If the pages contain other games, ignore them completely.
 - Include EVERY paragraph of the author's explanations, attached to the move it follows.
 - This is an instructional book — the prose commentary IS the content. Do not skip any of it.
 - Do NOT include PGN variations in parentheses. Keep all analysis lines as text within the commentary.
