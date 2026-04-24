@@ -211,6 +211,13 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache):
     ocr_text = pymupdf4llm.to_markdown(pdf_path, pages=pages)
     full_pgn = pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves)
 
+    _, pass2_errors = validate_pgn(full_pgn)
+    if pass2_errors:
+        print(f"  Warning: Pass 2 PGN invalid: {pass2_errors}", file=sys.stderr)
+        errors = errors + pass2_errors
+    else:
+        print(f"  Pass 2 validated OK", file=sys.stderr)
+
     cache[cache_k] = {"pass1": pgn_moves, "pass2": full_pgn, "errors": errors}
     save_cache(cache)
 
