@@ -6,3 +6,4 @@ output/
 .cache.json
 roadmap.md
 CLAUDE.md
+start.sh
