@@ -5,5 +5,7 @@ __pycache__/
 output/
 .cache.json
 roadmap.md
+walkthrough.md
 CLAUDE.md
 start.sh
+test.sh

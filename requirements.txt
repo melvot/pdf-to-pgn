@@ -1,0 +1,4 @@
+anthropic==0.86.0
+chess==1.11.2
+pymupdf==1.27.2.2
+pymupdf4llm==1.27.2.2
