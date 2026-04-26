@@ -11,10 +11,10 @@ import sys
 from pathlib import Path
 
 import anthropic
-import chess.pgn
-import io
 import pymupdf
 import pymupdf4llm
+
+from pgn_utils import validate_pgn, strip_result
 
 CACHE_FILE = ".cache.json"
 
@@ -80,21 +80,6 @@ def pass1_extract_moves(client, images_b64, game_hint=None):
     return strip_code_fences(response.content[0].text)
 
 
-def validate_pgn(pgn_text):
-    """Validate PGN using python-chess. Returns (game, errors)."""
-    game = chess.pgn.read_game(io.StringIO(pgn_text))
-    if game is None:
-        return None, ["Failed to parse PGN"]
-
-    errors = []
-    board = game.board()
-    for i, move in enumerate(game.mainline_moves()):
-        if move not in board.legal_moves:
-            errors.append(f"Illegal move at ply {i+1}: {move}")
-        board.push(move)
-    return game, errors
-
-
 def pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves, game_hint=None):
     """Pass 2: Attach full book commentary to the PGN moves."""
     target = f" for {game_hint}" if game_hint else ""
@@ -128,24 +113,6 @@ CRITICAL:
         messages=[{"role": "user", "content": content}],
     )
     return strip_code_fences(response.content[0].text)
-
-
-def strip_result(pgn_text):
-    """Remove result header and marker so Lichess doesn't spoil the ending."""
-    pgn_text = re.sub(r'^\[Result "[^"]*"\]\n', '', pgn_text, flags=re.MULTILINE)
-    # Collapse newlines inside comments (Lichess doesn't support multi-line comments)
-    pgn_text = re.sub(r'\{[^}]*\}', lambda m: m.group().replace('\n', ' '), pgn_text, flags=re.DOTALL)
-    # Collapse blank lines in movetext (they act as game separators in PGN)
-    header, sep, movetext = pgn_text.partition('\n\n')
-    if sep:
-        movetext = re.sub(r'\n\n+', ' ', movetext)
-        pgn_text = header + sep + movetext
-    parts = re.split(r'(\{[^}]*\})', pgn_text)
-    parts = [
-        re.sub(r'\s*(1-0|0-1|1/2-1/2|\*)\s*', ' ', p) if not p.startswith('{') else p
-        for p in parts
-    ]
-    return ''.join(parts).rstrip()
 
 
 MAX_GAME_PAGES = 15
