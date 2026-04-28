@@ -12,6 +12,7 @@ from pgn_utils import validate_pgn, strip_result
 from claude_api import get_client, pass1_extract_moves, pass2_attach_commentary
 from pdf_io import pdf_pages_to_images, parse_page_range, extract_ocr_text
 from detect import detect_games
+from game import Game
 
 CACHE_FILE = ".cache.json"
 
@@ -101,15 +102,7 @@ def cmd_detect(args, run_dir):
 
     manifest = {
         "pdf": args.pdf,
-        "games": [
-            {
-                "game_num": num,
-                "start_page": start,
-                "end_page": end,
-                "pages_human": f"{start+1}-{end+1}",
-            }
-            for num, start, end in games
-        ],
+        "games": [Game(num, start, end).to_dict() for num, start, end in games],
     }
 
     manifest_path = run_dir / "manifest.json"
@@ -118,7 +111,7 @@ def cmd_detect(args, run_dir):
     print(f"Manifest written to {manifest_path}", file=sys.stderr)
 
     for g in manifest["games"]:
-        print(f"  Game {g['game_num']}: pages {g['pages_human']}", file=sys.stderr)
+        print(f"  Game {g["num"]}: pages {g["pages_human"]}", file=sys.stderr)
 
 
 def load_manifest(run_dir):
@@ -128,18 +121,19 @@ def load_manifest(run_dir):
         print(f"Error: manifest not found at {path}. Run --detect first.", file=sys.stderr)
         sys.exit(1)
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+        return [Game.from_dict(g) for g in data["games"]]
 
 
 def cmd_generate(args, run_dir):
     """Process games from manifest into individual PGN files."""
     manifest = load_manifest(run_dir)
-    games = manifest["games"]
+    games = manifest
 
     # Filter by --games if specified
     if args.games:
         selected = set(int(n) for n in args.games.split(","))
-        games = [g for g in games if g["game_num"] in selected]
+        games = [g for g in games if g.num in selected]
         print(f"Processing {len(games)} selected game(s)", file=sys.stderr)
 
     games_dir = run_dir / "games"
@@ -153,9 +147,9 @@ def cmd_generate(args, run_dir):
         client = get_client()
 
     for g in games:
-        game_num = g["game_num"]
-        pages = list(range(g["start_page"], g["end_page"] + 1))
-        print(f"\nGame {game_num} (pages {g['pages_human']})...", file=sys.stderr)
+        game_num = g.num
+        pages = list(range(g.start, g.end + 1))
+        print(f"\nGame {game_num} (pages {g.pages_human})...", file=sys.stderr)
 
         cache_k = f"{stem}_game{game_num}"
         game_hint = f"Game {game_num}"
@@ -182,8 +176,8 @@ def cmd_combine(args, run_dir):
 
     all_pgns = []
     all_errors = []
-    for g in manifest["games"]:
-        game_num = g["game_num"]
+    for g in manifest:
+        game_num = g.num
         pgn_path = games_dir / f"game_{game_num:02d}.pgn"
         if not pgn_path.exists():
             print(f"  Warning: {pgn_path} not found, skipping", file=sys.stderr)
@@ -193,7 +187,7 @@ def cmd_combine(args, run_dir):
         errors_path = games_dir / f"game_{game_num:02d}.errors.txt"
         if errors_path.exists():
             for line in errors_path.read_text().strip().splitlines():
-                all_errors.append(f"Game {game_num} (pages {g['pages_human']}): {line}")
+                all_errors.append(f"Game {game_num} (pages {g.pages_human}): {line}")
 
     combined = "\n\n".join(all_pgns)
     out_path = run_dir / "combined.pgn"
