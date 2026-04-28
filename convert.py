@@ -2,7 +2,6 @@
 """Convert chess book PDF pages to PGN with full commentary using Claude Vision."""
 
 import argparse
-from datetime import datetime
 import json
 import os
 import sys
@@ -13,8 +12,7 @@ from claude_api import get_client, pass1_extract_moves, pass2_attach_commentary
 from pdf_io import pdf_pages_to_images, parse_page_range, extract_ocr_text
 from detect import detect_games
 from game import Game
-
-CACHE_FILE = ".cache.json"
+from storage import load_cache, save_cache, cache_key, make_run_dir, find_run_dir, load_manifest
 
 
 def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=None):
@@ -56,44 +54,6 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=N
     return full_pgn, errors
 
 
-def load_cache():
-    """Load cache from disk."""
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def save_cache(cache):
-    """Save cache to disk."""
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f, indent=2)
-
-
-def make_run_dir(stem):
-    """Create a new timestamped run directory."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path("output") / f"{stem}_{timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def find_run_dir(args, stem):
-    """Find the run directory from --manifest flag or latest run."""
-    if args.manifest:
-        return Path(args.manifest).parent
-    candidates = sorted(Path("output").glob(f"{stem}_*/"), reverse=True)
-    if not candidates:
-        print(f"Error: no run found for '{stem}'. Run --detect first.", file=sys.stderr)
-        sys.exit(1)
-    return candidates[0]
-
-
-def cache_key(pdf_path, pages_str):
-    """Generate a cache key from PDF name and page range."""
-    return f"{Path(pdf_path).stem}_p{pages_str}"
-
-
 def cmd_detect(args, run_dir):
     """Detect game boundaries and write manifest."""
     print("Detecting game boundaries...", file=sys.stderr)
@@ -112,17 +72,6 @@ def cmd_detect(args, run_dir):
 
     for g in manifest["games"]:
         print(f"  Game {g["num"]}: pages {g["pages_human"]}", file=sys.stderr)
-
-
-def load_manifest(run_dir):
-    """Load manifest from run directory."""
-    path = run_dir / "manifest.json"
-    if not path.exists():
-        print(f"Error: manifest not found at {path}. Run --detect first.", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        data = json.load(f)
-        return [Game.from_dict(g) for g in data["games"]]
 
 
 def cmd_generate(args, run_dir):
