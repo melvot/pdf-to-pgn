@@ -9,3 +9,5 @@ walkthrough.md
 CLAUDE.md
 start.sh
 test.sh
+eval/eval_games.json
+eval/eval_games_full.json
