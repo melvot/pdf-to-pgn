@@ -10,13 +10,7 @@ def validate_pgn(pgn_text):
     if game is None:
         return None, ["Failed to parse PGN"]
 
-    errors = []
-    board = game.board()
-    for i, move in enumerate(game.mainline_moves()):
-        if move not in board.legal_moves:
-            errors.append(f"Illegal move at ply {i+1}: {move}")
-        board.push(move)
-    return game, errors
+    return game, [str(e) for e in game.errors]
 
 
 def strip_result(pgn_text):
