@@ -19,6 +19,21 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
+def strip_code_fences(text):
+    """Remove markdown code fences from LLM output.
+    Handles preamble text before the first code block."""
+    # If there's a code fence anywhere, extract just its contents
+    match = re.search(r'```[^\n]*\n(.*?)```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+def extract_pgn_from_response(text):
+    text = strip_code_fences(text).strip()
+    match = re.search(r'1\.', text)
+    return text[match.start():] if match else text
+
+
 def build_image_content(images_b64):
     """Build Claude API image content blocks."""
     return [
@@ -30,16 +45,6 @@ def build_image_content(images_b64):
     ]
 
 
-def strip_code_fences(text):
-    """Remove markdown code fences from LLM output.
-    Handles preamble text before the first code block."""
-    # If there's a code fence anywhere, extract just its contents
-    match = re.search(r'```[^\n]*\n(.*?)```', text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
-
-
 def pass1_extract_moves(client, images_b64, game_hint=None):
     """Pass 1: Extract clean PGN moves from page images (no commentary)."""
     target = f" for {game_hint}" if game_hint else ""
@@ -48,11 +53,8 @@ def pass1_extract_moves(client, images_b64, game_hint=None):
         {
             "type": "text",
             "text": (
-                f"These are pages from a chess book. Extract ONLY the chess moves{target} "
-                "as PGN. Use standard algebraic notation (K, Q, R, B, N for pieces). "
-                "Do NOT include commentary, annotations, or variations. Just the "
-                "main line moves. Include game headers [Event], [White], [Black], "
-                f"[Result], [Opening] if visible.{ignore} Output only valid PGN, nothing else."
+                "These are the pages of the chess book, extract only"
+                f"the PGN moves{target}.{ignore}"
             ),
         }
     ]
@@ -61,9 +63,20 @@ def pass1_extract_moves(client, images_b64, game_hint=None):
         model=MODEL,
         max_tokens=4096,
         temperature=0,
+        system=(
+            "You are a PGN extractor. These are pages from a chess book. "
+            "Extract ONLY the chess moves for a single whole game as PGN. "
+            "Use standard algebraic notation (K, Q, R, B, N for pieces). "
+            "If a move in the source includes a file or rank disambiguator "
+            "(e.g. Nbd2, Rac1), you MUST include it exactly. Never drop "
+            "disambiguating characters. Do NOT include commentary, annotations, or variations."
+            "Only include the main line moves. Do not include any game headers such as [Event],"
+            "[White], [Black], [Result], [Opening]. Output ONLY the valid PGN moves, nothing else. "
+            "Your response must start immediately with '1.' and contain nothing else."
+        ),
         messages=[{"role": "user", "content": content}],
     )
-    return strip_code_fences(response.content[0].text)
+    return extract_pgn_from_response(response.content[0].text)
 
 
 def pass2_attach_commentary(client, images_b64, ocr_text, pgn_moves, game_hint=None):
