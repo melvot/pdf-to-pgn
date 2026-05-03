@@ -2,6 +2,7 @@ __pycache__/
 .env
 .venv/
 *.pdf
+*.png
 output/
 .cache.json
 roadmap.md
