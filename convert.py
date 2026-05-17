@@ -2,7 +2,6 @@
 """Convert chess book PDF pages to PGN with full commentary using Claude Vision."""
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -10,16 +9,11 @@ from pathlib import Path
 from pgn_utils import validate_pgn, strip_result
 from claude_api import get_client, pass1_extract_moves, pass2_attach_commentary
 from pdf_io import pdf_pages_to_images, parse_page_range, extract_ocr_text
-from detect import detect_games
-from game import Game
-from storage import load_cache, save_cache, cache_key, make_run_dir, find_run_dir, load_manifest
+from storage import make_run_dir
 
 
-def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=None):
+def process_game(client, pdf_path, pages, game_hint=None):
     """Process a single game through pass 1 and pass 2. Returns (full_pgn, errors)."""
-    if use_cache and cache_k in cache:
-        print(f"  Using cached responses", file=sys.stderr)
-        return cache[cache_k]["pass2"], cache[cache_k].get("errors", [])
 
     if client is None:
         client = get_client()
@@ -30,7 +24,7 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=N
     print(f"  Pass 1: Extracting moves...", file=sys.stderr)
     pgn_moves = pass1_extract_moves(client, images_b64, game_hint)
 
-    game, errors = validate_pgn(pgn_moves)
+    _, errors = validate_pgn(pgn_moves)
     if errors:
         print(f"  Warning: PGN validation issues: {errors}", file=sys.stderr)
     else:
@@ -48,105 +42,7 @@ def process_game(client, pdf_path, pages, cache, cache_k, use_cache, game_hint=N
     else:
         print(f"  Pass 2 validated OK", file=sys.stderr)
 
-    cache[cache_k] = {"pass1": pgn_moves, "pass2": full_pgn, "errors": errors}
-    save_cache(cache)
-
     return full_pgn, errors
-
-
-def cmd_detect(args, run_dir):
-    """Detect game boundaries and write manifest."""
-    print("Detecting game boundaries...", file=sys.stderr)
-    games = detect_games(args.pdf)
-    print(f"Found {len(games)} games", file=sys.stderr)
-
-    manifest = {
-        "pdf": args.pdf,
-        "games": [Game(num, start, end).to_dict() for num, start, end in games],
-    }
-
-    manifest_path = run_dir / "manifest.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"Manifest written to {manifest_path}", file=sys.stderr)
-
-    for g in manifest["games"]:
-        print(f"  Game {g["num"]}: pages {g["pages_human"]}", file=sys.stderr)
-
-
-def cmd_generate(args, run_dir):
-    """Process games from manifest into individual PGN files."""
-    manifest = load_manifest(run_dir)
-    games = manifest
-
-    # Filter by --games if specified
-    if args.games:
-        selected = set(int(n) for n in args.games.split(","))
-        games = [g for g in games if g.num in selected]
-        print(f"Processing {len(games)} selected game(s)", file=sys.stderr)
-
-    games_dir = run_dir / "games"
-    games_dir.mkdir(exist_ok=True)
-
-    cache = load_cache()
-    stem = Path(args.pdf).stem
-
-    client = None
-    if not args.cached:
-        client = get_client()
-
-    for g in games:
-        game_num = g.num
-        pages = list(range(g.start, g.end + 1))
-        print(f"\nGame {game_num} (pages {g.pages_human})...", file=sys.stderr)
-
-        cache_k = f"{stem}_game{game_num}"
-        game_hint = f"Game {game_num}"
-        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached, game_hint)
-        full_pgn = strip_result(full_pgn)
-
-        pgn_path = games_dir / f"game_{game_num:02d}.pgn"
-        pgn_path.write_text(full_pgn)
-
-        errors_path = games_dir / f"game_{game_num:02d}.errors.txt"
-        if errors:
-            errors_path.write_text("\n".join(errors) + "\n")
-            print(f"  Errors: {errors_path}", file=sys.stderr)
-        elif errors_path.exists():
-            errors_path.unlink()
-
-    print(f"\nGenerated PGNs in {games_dir}", file=sys.stderr)
-
-
-def cmd_combine(args, run_dir):
-    """Combine individual game PGNs into a single file."""
-    manifest = load_manifest(run_dir)
-    games_dir = run_dir / "games"
-
-    all_pgns = []
-    all_errors = []
-    for g in manifest:
-        game_num = g.num
-        pgn_path = games_dir / f"game_{game_num:02d}.pgn"
-        if not pgn_path.exists():
-            print(f"  Warning: {pgn_path} not found, skipping", file=sys.stderr)
-            continue
-        all_pgns.append(pgn_path.read_text().rstrip())
-
-        errors_path = games_dir / f"game_{game_num:02d}.errors.txt"
-        if errors_path.exists():
-            for line in errors_path.read_text().strip().splitlines():
-                all_errors.append(f"Game {game_num} (pages {g.pages_human}): {line}")
-
-    combined = "\n\n".join(all_pgns)
-    out_path = run_dir / "combined.pgn"
-    out_path.write_text(combined)
-    print(f"Combined {len(all_pgns)} games into {out_path}", file=sys.stderr)
-
-    if all_errors:
-        errors_path = run_dir / "combined.errors.txt"
-        errors_path.write_text("\n".join(all_errors) + "\n")
-        print(f"Errors: {errors_path}", file=sys.stderr)
 
 
 def main():
@@ -154,17 +50,10 @@ def main():
     parser.add_argument("pdf", help="Path to PDF file")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--pages", help="Page range, e.g. '1-5' or '3'")
-    group.add_argument("--detect", action="store_true", help="Detect games, write manifest")
-    group.add_argument("--generate", action="store_true", help="Process games from manifest")
-    group.add_argument("--combine", action="store_true", help="Combine game PGNs into one file")
-    group.add_argument("--book", action="store_true", help="Full pipeline (detect+generate+combine)")
-    parser.add_argument("--games", help="Comma-separated game numbers (with --generate)")
-    parser.add_argument("--manifest", help="Path to manifest file")
-    parser.add_argument("--cached", action="store_true", help="Use cached API responses")
+
     args = parser.parse_args()
 
-    needs_api = (args.pages or args.generate or args.book) and not args.cached
-    if needs_api and not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
         sys.exit(1)
 
@@ -175,41 +64,22 @@ def main():
 
     stem = pdf_path.stem
 
-    if args.detect or args.book or args.pages:
-        run_dir = make_run_dir(stem)
-    else:
-        run_dir = find_run_dir(args, stem)
+    run_dir = make_run_dir(stem)
 
-    if args.detect:
-        cmd_detect(args, run_dir)
-    elif args.generate:
-        cmd_generate(args, run_dir)
-    elif args.combine:
-        cmd_combine(args, run_dir)
-    elif args.book:
-        cmd_detect(args, run_dir)
-        cmd_generate(args, run_dir)
-        cmd_combine(args, run_dir)
-    else:
-        # --pages mode
-        cache = load_cache()
-        client = None
-        if not args.cached:
-            client = get_client()
+    client = get_client()
 
-        pages = parse_page_range(args.pages)
-        print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
-        cache_k = cache_key(args.pdf, args.pages)
-        full_pgn, errors = process_game(client, args.pdf, pages, cache, cache_k, args.cached)
-        full_pgn = strip_result(full_pgn)
-        if errors:
-            print(f"Validation errors: {errors}", file=sys.stderr)
+    pages = parse_page_range(args.pages)
+    print(f"Processing {pdf_path}, pages {[p+1 for p in pages]}...", file=sys.stderr)
+    full_pgn, errors = process_game(client, args.pdf, pages)
+    full_pgn = strip_result(full_pgn)
+    if errors:
+        print(f"Validation errors: {errors}", file=sys.stderr)
 
-        page_label = args.pages.replace("-", "_")
-        out_path = run_dir / f"p{page_label}.pgn"
-        out_path.write_text(full_pgn)
-        print(f"\nSaved to {out_path}", file=sys.stderr)
-        print(full_pgn)
+    page_label = args.pages.replace("-", "_")
+    out_path = run_dir / f"p{page_label}.pgn"
+    out_path.write_text(full_pgn)
+    print(f"\nSaved to {out_path}", file=sys.stderr)
+    print(full_pgn)
 
 
 if __name__ == "__main__":

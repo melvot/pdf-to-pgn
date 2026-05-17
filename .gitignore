@@ -4,10 +4,12 @@ __pycache__/
 *.pdf
 *.png
 output/
+books/
 .cache.json
 roadmap.md
 walkthrough.md
 CLAUDE.md
+.claude/
 start.sh
 test.sh
 eval/eval_games.json
